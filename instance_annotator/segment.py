@@ -2,41 +2,62 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import numpy as np
 
-_SP_DIR = Path(__file__).resolve().parents[1]
-_ROOT = _SP_DIR.parent
-for p in (str(_ROOT), str(_SP_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
+from .ecomodel_link import ecomodel_root, local_output_dir, synthetic_pipeline
 
 METHODS = ("scanline", "treelearn", "treex", "tls2trees", "pointsam",
            "forestformer3d", "segmentanytreev2")
 
-_DEFAULT_TREELEARN = str(_ROOT / "TreeLearn" / "configs" / "pipeline" / "ecomodel.yaml")
-_STOCK_POINTSAM = str(_ROOT / "thirdparty" / "checkpoints" / "point_sam" / "model.safetensors")
-_DEFAULT_POINTSAM = os.environ.get("POINTSAM_CKPT") or _STOCK_POINTSAM
-_POINTSAM_FT_DIR = _SP_DIR / "pointsam_checkpoints"
+
+def _paths() -> Tuple[Path, Path, Path]:
+    """(ecomodel_root, synthetic_pipeline, pointsam_ft_dir)."""
+    root = ecomodel_root()
+    sp = synthetic_pipeline(root)
+    return root, sp, sp / "pointsam_checkpoints"
+
+
+def _default_treelearn() -> str:
+    root, _, _ = _paths()
+    return str(root / "TreeLearn" / "configs" / "pipeline" / "ecomodel.yaml")
+
+
+def _stock_pointsam() -> str:
+    root, _, _ = _paths()
+    return str(root / "thirdparty" / "checkpoints" / "point_sam" / "model.safetensors")
+
+
+def _default_pointsam() -> str:
+    return os.environ.get("POINTSAM_CKPT") or _stock_pointsam()
+
+
+# Mutable default used by ``--pointsam_ckpt`` on the server.
+_DEFAULT_POINTSAM = ""
 
 
 def pointsam_weights() -> list:
     """Selectable Point-SAM checkpoints: [{"path", "label"}], default first."""
+    _, _, ft_dir = _paths()
+    stock = _stock_pointsam()
+    default = _DEFAULT_POINTSAM or _default_pointsam()
     found = []
-    if os.path.isfile(_STOCK_POINTSAM):
-        found.append((_STOCK_POINTSAM, "Stock Point-SAM (large)"))
-    if _POINTSAM_FT_DIR.is_dir():
-        files = sorted(_POINTSAM_FT_DIR.glob("*/*.safetensors"),
-                       key=lambda f: (f.parent.name.startswith("_"), f.parent.name, f.stem != "best", f.stem))
+    if os.path.isfile(stock):
+        found.append((stock, "Stock Point-SAM (large)"))
+    if ft_dir.is_dir():
+        files = sorted(
+            ft_dir.glob("*/*.safetensors"),
+            key=lambda f: (f.parent.name.startswith("_"), f.parent.name, f.stem != "best", f.stem),
+        )
         found += [(str(f), f"Fine-tuned {f.parent.name} / {f.stem}") for f in files]
-    if os.path.isfile(_DEFAULT_POINTSAM) and all(os.path.normcase(p) != os.path.normcase(_DEFAULT_POINTSAM)
-                                                 for p, _ in found):
-        found.append((_DEFAULT_POINTSAM, f"Custom: {Path(_DEFAULT_POINTSAM).name}"))
-    default = os.path.normcase(os.path.abspath(_DEFAULT_POINTSAM))
-    found.sort(key=lambda x: os.path.normcase(os.path.abspath(x[0])) != default)
+    if os.path.isfile(default) and all(
+        os.path.normcase(p) != os.path.normcase(default) for p, _ in found
+    ):
+        found.append((default, f"Custom: {Path(default).name}"))
+    default_key = os.path.normcase(os.path.abspath(default))
+    found.sort(key=lambda x: os.path.normcase(os.path.abspath(x[0])) != default_key)
     return [{"path": p, "label": lab} for p, lab in found]
 
 
@@ -68,14 +89,13 @@ def default_ckpt_kwargs(
     results_folder: Optional[str] = None,
 ) -> Dict:
     return {
-        "treelearn_config_path": treelearn_config or _DEFAULT_TREELEARN,
+        "treelearn_config_path": treelearn_config or _default_treelearn(),
         "treelearn_use_gpu": True,
-        "pointsam_ckpt": pointsam_ckpt or _DEFAULT_POINTSAM,
+        "pointsam_ckpt": pointsam_ckpt or _DEFAULT_POINTSAM or _default_pointsam(),
         "pointsam_config": "large",
         "pointsam_use_gpu": True,
         "run_leaf_removal": bool(leaf_removal),
-        "results_folder": results_folder
-        or str(_SP_DIR / "output" / "annotator_workdir"),
+        "results_folder": results_folder or str(local_output_dir("annotator_workdir")),
         "treex_adapt_synthetic": not bool(treex_stock_tls),
     }
 

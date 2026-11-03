@@ -1,8 +1,7 @@
 """
 Headless demos for the TLS instance annotator.
 
-  python -m instance_annotator.cli_demo
-  python SyntheticPipeline/instance_annotator/cli_demo.py --tile ...
+  python -m instance_annotator.cli_demo --ecomodel-root D:/Projects/Ecomodel
 """
 from __future__ import annotations
 
@@ -13,12 +12,12 @@ from pathlib import Path
 
 import numpy as np
 
-_SP_DIR = Path(__file__).resolve().parents[1]
-_ROOT = _SP_DIR.parent
-for p in (str(_ROOT), str(_SP_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-
+from instance_annotator.ecomodel_link import (
+    EcomodelLinkError,
+    ensure_ecomodel_on_path,
+    local_output_dir,
+    synthetic_pipeline,
+)
 from instance_annotator.io import load_tile_prefix, save_tile
 from instance_annotator.labels import LabelEditor
 from instance_annotator.segment import run_method
@@ -26,9 +25,7 @@ from instance_annotator.viz import selection_from_click
 
 
 def _demo_dir() -> Path:
-    d = _SP_DIR / "output" / "annotator_demos"
-    d.mkdir(parents=True, exist_ok=True)
-    return d
+    return local_output_dir("annotator_demos")
 
 
 def demo_treelearn(tile_prefix: Path, out: Path) -> None:
@@ -39,7 +36,7 @@ def demo_treelearn(tile_prefix: Path, out: Path) -> None:
         tile["intensity"],
         "treelearn",
         treex_stock_tls=True,
-        results_folder=str(_SP_DIR / "output" / "annotator_workdir"),
+        results_folder=str(local_output_dir("annotator_workdir")),
     )
     print("  ", info)
     meta = dict(tile["meta"])
@@ -54,7 +51,6 @@ def demo_treelearn(tile_prefix: Path, out: Path) -> None:
         meta=meta,
     )
     print("  wrote", paths)
-    # stash labels for demo 3
     np.save(out / "demo_treelearn_work_labels.npy", lab)
     np.save(out / "demo_treelearn_xyz.npy", tile["xyz"])
     np.save(out / "demo_treelearn_inten.npy", tile["intensity"])
@@ -66,7 +62,6 @@ def demo_manual(tile_prefix: Path, out: Path) -> None:
     tile = load_tile_prefix(tile_prefix)
     ed = LabelEditor(n_points=len(tile["xyz"]))
     xyz = tile["xyz"]
-    # Seed near two XY percentiles to create fake trees
     xs, ys = xyz[:, 0], xyz[:, 1]
     p1 = np.array([np.percentile(xs, 30), np.percentile(ys, 30), np.percentile(xyz[:, 2], 40)])
     p2 = np.array([np.percentile(xs, 70), np.percentile(ys, 70), np.percentile(xyz[:, 2], 55)])
@@ -74,7 +69,6 @@ def demo_manual(tile_prefix: Path, out: Path) -> None:
     i2 = int(np.argmin(np.sum((xyz - p2) ** 2, axis=1)))
     m1 = selection_from_click(xyz, i1, radius_m=2.0)
     m2 = selection_from_click(xyz, i2, radius_m=2.0)
-    # Avoid overlap preference for blob 1
     m2 = m2 & ~m1
     ed.paint_new(m1)
     ed.paint_new(m2)
@@ -87,7 +81,7 @@ def demo_manual(tile_prefix: Path, out: Path) -> None:
         ed.labels,
         meta=meta,
     )
-    print(f"  trees={ed.num_trees} pts_t0={(ed.labels==0).sum()} pts_t1={(ed.labels==1).sum()}")
+    print(f"  trees={ed.num_trees} pts_t0={(ed.labels == 0).sum()} pts_t1={(ed.labels == 1).sum()}")
     print("  wrote", paths)
 
 
@@ -104,19 +98,16 @@ def demo_correct(out: Path) -> None:
     ed = LabelEditor(lab)
     ids = ed.tree_ids()
     if len(ids) >= 2:
-        # Merge two largest instances
         cnt = ed.counts()
         counts = sorted(((int(i), cnt[int(i)]) for i in ids), key=lambda t: -t[1])
         a, b = counts[0][0], counts[1][0]
         n = ed.merge(b, a)
         print(f"  merged tree {b} -> {a} ({n} pts)")
-    # Mark a small ball near centroid as non-tree
     c = xyz.mean(axis=0)
     i0 = int(np.argmin(np.sum((xyz - c) ** 2, axis=1)))
     mask = selection_from_click(xyz, i0, radius_m=0.5)
     n_nt = ed.mark_nontree(mask)
     print(f"  marked {n_nt} pts non-tree near centroid")
-    # undo smoke
     ed.undo()
     ed.redo()
     meta = {"source_method": "treelearn", "demo": "demo_corrected", "edited": True}
@@ -131,13 +122,14 @@ def demo_correct(out: Path) -> None:
     print("  wrote", paths)
 
 
-def main() -> None:
+def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Run instance annotator demos")
+    parser.add_argument("--ecomodel-root", default="", help="Path to Ecomodel checkout")
     parser.add_argument(
         "--tile",
         type=str,
-        default=str(_SP_DIR / "testdataset" / "real_instance" / "l1w_t00_03"),
-        help="Tile prefix under real_instance (or similar)",
+        default="",
+        help="Tile prefix (default: linked Ecomodel real_instance/l1w_t00_03)",
     )
     parser.add_argument(
         "--skip_treelearn",
@@ -150,8 +142,16 @@ def main() -> None:
         default="all",
         help="all | treelearn | manual | correct",
     )
-    args = parser.parse_args()
-    tile = Path(args.tile)
+    args = parser.parse_args(argv)
+    try:
+        ensure_ecomodel_on_path(args.ecomodel_root or None, persist=True, allow_prompt=True)
+    except EcomodelLinkError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(2)
+
+    tile = Path(args.tile) if args.tile else (
+        synthetic_pipeline() / "testdataset" / "real_instance" / "l1w_t00_03"
+    )
     out = _demo_dir()
     which = args.only.lower()
     if which in ("all", "treelearn") and not args.skip_treelearn:

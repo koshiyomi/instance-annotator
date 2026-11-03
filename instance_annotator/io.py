@@ -13,11 +13,14 @@ except ImportError as exc:  # pragma: no cover
     raise ImportError("pip install laspy lazrs") from exc
 
 PathLike = Union[str, Path]
-_SP_DIR = Path(__file__).resolve().parents[1]
+
+from .ecomodel_link import annotator_repo_root, synthetic_pipeline  # noqa: E402
+
+_SP_DIR = annotator_repo_root()
 
 
 def _as_path(p: PathLike) -> Path:
-    """Resolve path; relative paths try SyntheticPipeline/ first, then cwd."""
+    """Resolve path; relative paths try annotator repo, linked SyntheticPipeline, then cwd."""
     path = Path(p).expanduser()
     if path.is_absolute():
         return path.resolve()
@@ -29,13 +32,21 @@ def _as_path(p: PathLike) -> Path:
             or Path(str(cand) + "_scan.las").exists()
         )
 
-    sp_cand = (_SP_DIR / path).resolve()
-    if _looks_real(sp_cand):
-        return sp_cand
+    for base in (_SP_DIR,):
+        cand = (base / path).resolve()
+        if _looks_real(cand):
+            return cand
+    try:
+        eco_sp = synthetic_pipeline()
+        cand = (eco_sp / path).resolve()
+        if _looks_real(cand):
+            return cand
+    except Exception:
+        pass
     cwd_cand = path.resolve()
     if _looks_real(cwd_cand):
         return cwd_cand
-    return sp_cand
+    return (_SP_DIR / path).resolve()
 
 
 def load_laz_xyzi(path: PathLike) -> Tuple[np.ndarray, np.ndarray]:

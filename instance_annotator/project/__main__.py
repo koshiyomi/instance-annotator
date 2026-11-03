@@ -14,13 +14,16 @@ import json
 import sys
 from pathlib import Path
 
-_SP = Path(__file__).resolve().parents[2]
+from instance_annotator.ecomodel_link import EcomodelLinkError, annotator_repo_root, ensure_ecomodel_on_path
+
+_SP = annotator_repo_root()
 if str(_SP) not in sys.path:
     sys.path.insert(0, str(_SP))
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="python -m instance_annotator.project")
+    ap.add_argument("--ecomodel-root", default="", help="Path to Ecomodel checkout (saved for later runs)")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     b = sub.add_parser("build", help="Build octree + label store from a folder of tiles")
@@ -63,6 +66,11 @@ def main(argv=None) -> int:
     i.add_argument("project")
 
     a = ap.parse_args(argv)
+    try:
+        ensure_ecomodel_on_path(a.ecomodel_root or None, persist=True, allow_prompt=True)
+    except EcomodelLinkError as exc:
+        print(exc, file=sys.stderr)
+        return 2
     if a.cmd == "build":
         from .build import build_project, default_workers
 

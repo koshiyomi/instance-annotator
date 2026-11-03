@@ -19,9 +19,11 @@ from ..io import _as_path, load_cloud, load_tile_prefix, save_tile
 from ..labels import LabelEditor
 from ..lod import DEFAULT_MAX_DISPLAY, Lod, build_lod
 
-_SP_DIR = Path(__file__).resolve().parents[2]
-WORKDIR = _SP_DIR / "output" / "annotator_workdir"
-DEFAULT_EXPORT_DIR = _SP_DIR / "output" / "annotator_exports"
+from ..ecomodel_link import annotator_repo_root, local_output_dir
+
+_SP_DIR = annotator_repo_root()
+WORKDIR = local_output_dir("annotator_workdir")
+DEFAULT_EXPORT_DIR = local_output_dir("annotator_exports")
 AUTOSAVE_EVERY = 10
 INTENSITY_WOOD_LEAF = ("percentile", "intensity", "otsu")
 

@@ -1,0 +1,7 @@
+numpy
+scipy
+laspy
+fastapi
+uvicorn[standard]
+python-multipart
+pydantic

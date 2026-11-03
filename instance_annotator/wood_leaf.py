@@ -1,15 +1,11 @@
 ﻿"""Wood / leaf reference classifiers for the instance annotator."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
 from typing import Optional, Tuple
 
 import numpy as np
 
-_ROOT = Path(__file__).resolve().parents[2]
-if str(_ROOT) not in sys.path:
-    sys.path.insert(0, str(_ROOT))
+# SegmentRGI / GBSeparation come from the linked Ecomodel tree (sys.path via ecomodel_link).
 
 METHODS = (
     "stem_grow",

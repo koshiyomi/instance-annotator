@@ -1,8 +1,8 @@
 """FastAPI app: serves the web UI and the annotator API.
 
-  cd SyntheticPipeline
-  python -m instance_annotator            # opens http://127.0.0.1:8765
-  python -m instance_annotator --load testdataset/real_instance/l1w_t00_03
+  pip install -e .
+  python -m instance_annotator --ecomodel-root D:/Projects/Ecomodel
+  python -m instance_annotator --load path/to/tile_prefix
   python -m instance_annotator --project D:/pointclouds/island_project
 """
 from __future__ import annotations
@@ -13,17 +13,17 @@ import threading
 import webbrowser
 from pathlib import Path
 
-_SP_DIR = Path(__file__).resolve().parents[2]
-_ROOT = _SP_DIR.parent
-# Sibling checkout: D:\Projects\PyTLidar is the PyTLidar package, so its parent must be on the path.
-_PROJECTS = _ROOT.parent
-_PYTLIDAR = _PROJECTS / "PyTLidar"
-for p in (str(_ROOT), str(_SP_DIR)):
-    if p not in sys.path:
-        sys.path.insert(0, p)
-for p in (str(_PROJECTS), str(_PYTLIDAR)):
-    if Path(p).is_dir() and p not in sys.path:
-        sys.path.append(p)
+from instance_annotator.ecomodel_link import (
+    EcomodelLinkError,
+    ensure_ecomodel_on_path,
+    local_output_dir,
+)
+
+try:
+    ensure_ecomodel_on_path(allow_prompt=False, persist=False)
+except EcomodelLinkError:
+    # Deferred until main(): first-run prompt / --ecomodel-root.
+    pass
 
 from fastapi import FastAPI  # noqa: E402
 from fastapi.responses import FileResponse  # noqa: E402
@@ -68,12 +68,29 @@ def main(argv=None) -> None:
     ap.add_argument("--max_display", type=int, default=None, help="Display LOD point cap")
     ap.add_argument("--no_browser", action="store_true")
     ap.add_argument("--project", default="", help="Island project folder to open on start")
+    ap.add_argument(
+        "--ecomodel-root",
+        default="",
+        help="Path to the Ecomodel checkout (saved for later runs)",
+    )
     ap.add_argument("--pointsam_ckpt", default="",
                     help="Point-SAM weights for the pointsam method (e.g. pointsam_checkpoints/decoder_ft/best.safetensors)")
     args = ap.parse_args(argv)
 
+    try:
+        root = ensure_ecomodel_on_path(
+            args.ecomodel_root or None,
+            persist=True,
+            allow_prompt=True,
+        )
+    except EcomodelLinkError as exc:
+        print(exc, file=sys.stderr)
+        sys.exit(2)
+    print(f"Ecomodel: {root}")
+    local_output_dir("annotator_workdir")
+    local_output_dir("annotator_exports")
+
     if args.pointsam_ckpt:
-        from pathlib import Path
         from .. import segment
 
         ckpt = Path(args.pointsam_ckpt).expanduser().resolve()

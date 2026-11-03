@@ -1,13 +1,13 @@
 """Tests for merge_fragments (split-tree detection and merging)."""
 import numpy as np
 
-from instance_annotator.merge_fragments import merge_fragments
+from instance_annotator.merge_fragments import MergeParams, find_merges, merge_fragments, analyse
 
 
-def _tree(rng, x, y, h=12.0, crown_r=2.5, n_stem=600, n_crown=3000):
+def _tree(rng, x, y, h=12.0, crown_r=2.5, n_stem=600, n_crown=3000, stem_r=0.15):
     z = rng.uniform(0, h * 0.5, n_stem)
     a = rng.uniform(0, 2 * np.pi, n_stem)
-    stem = np.stack([x + 0.15 * np.cos(a), y + 0.15 * np.sin(a), z], 1)
+    stem = np.stack([x + stem_r * np.cos(a), y + stem_r * np.sin(a), z], 1)
     v = rng.normal(size=(n_crown, 3))
     v /= np.linalg.norm(v, axis=1, keepdims=True)
     r = crown_r * rng.uniform(0.6, 1.0, n_crown)[:, None]
@@ -59,3 +59,42 @@ def test_no_labels_is_noop():
     lab = np.full(100, -1, np.int32)
     out, rep = merge_fragments(xyz, lab)
     assert (out == lab).all() and rep["merged"] == 0
+
+
+def test_dense_neighbors_do_not_auto_merge():
+    """Two stems ~1.0 m apart with touching crowns must stay separate under the retuned defaults."""
+    rng = np.random.default_rng(4)
+    ground = np.stack([rng.uniform(-3, 6, 5000), rng.uniform(-3, 3, 5000), rng.normal(0, 0.02, 5000)], 1)
+    s0, c0 = _tree(rng, 0.0, 0.0, crown_r=2.2)
+    s1, c1 = _tree(rng, 1.0, 0.0, crown_r=2.2)  # stems ~1 m; crowns overlap
+    xyz = np.vstack([ground, s0, c0, s1, c1])
+    lab = np.concatenate([
+        np.full(len(ground), -1),
+        np.zeros(len(s0) + len(c0)),
+        np.ones(len(s1) + len(c1)),
+    ]).astype(np.int32)
+    out, rep = merge_fragments(xyz, lab)
+    assert len(np.unique(out[out >= 0])) == 2, rep
+    assert not any(m["reason"] == "same stem" for m in rep["auto"]), rep
+
+
+def test_weak_contact_close_stems_go_to_review():
+    """Close stems with almost no voxel contact should not auto-merge (AUTO_STEM guard)."""
+    rng = np.random.default_rng(5)
+    # Two thin vertical stems 0.2 m apart, crowns far above and non-touching.
+    z = np.linspace(0.1, 4.0, 400)
+    s0 = np.stack([np.full(400, 0.0), np.zeros(400), z], 1)
+    s1 = np.stack([np.full(400, 0.2), np.zeros(400), z], 1)
+    c0 = np.stack([rng.normal(0.0, 0.3, 800), rng.normal(0.0, 0.3, 800), rng.uniform(8, 10, 800)], 1)
+    c1 = np.stack([rng.normal(3.0, 0.3, 800), rng.normal(0.0, 0.3, 800), rng.uniform(8, 10, 800)], 1)
+    ground = np.stack([rng.uniform(-2, 5, 2000), rng.uniform(-2, 2, 2000), rng.normal(0, 0.02, 2000)], 1)
+    xyz = np.vstack([ground, s0, c0, s1, c1])
+    lab = np.concatenate([
+        np.full(len(ground), -1),
+        np.zeros(len(s0) + len(c0)),
+        np.ones(len(s1) + len(c1)),
+    ]).astype(np.int32)
+    # Force a synthetic "same stem" proposal path with auto_stem high and stem_same large.
+    info = analyse(xyz, lab)
+    auto, cands = find_merges(info, params=MergeParams(stem_same=0.5, auto_stem=0.2, auto_frag=1.0, auto_float=1.0))
+    assert not any(m["a"] in (0, 1) and m["b"] in (0, 1) for m in auto), (auto, cands)

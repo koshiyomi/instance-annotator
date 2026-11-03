@@ -8,12 +8,14 @@ shared or face-adjacent voxels.
 Rules, per touching pair (a, b):
   - fragment + stemmed tree   -> merge the fragment into its best-touching stemmed tree (auto)
   - fragment + fragment       -> merge (auto) when they touch strongly
-  - two stems within STEM_SAME m of each other -> one tree split vertically/sideways (auto)
+  - two stems within STEM_SAME m of each other and contact >= AUTO_STEM -> same tree (auto)
   - two stemmed trees otherwise -> review candidate only (never auto)
   - a fragment touching two hosts about equally -> review candidate only
+  - merged size exceeding MAX_SIZE_RATIO * max(parts) -> review only (0 = off)
 """
 from __future__ import annotations
 
+from dataclasses import asdict, dataclass, replace
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
@@ -21,12 +23,42 @@ import numpy as np
 VOXEL = 0.3          # contact voxel size (m)
 STEM_HAG = 2.0       # an instance "has a stem" if it has points below this height above ground
 STEM_MIN_PTS = 10
-STEM_SAME = 0.6      # stems closer than this (xy, m) belong to the same tree
+# Defaults from output/benchmark_merge_fragments_summary.md (14 real val tiles):
+# winner ss0.3_af0.02_ao0.25_am0.3 plus AUTO_STEM / MAX_SIZE_RATIO guards.
+STEM_SAME = 0.3      # stems closer than this (xy, m) may be the same tree
 AUTO_FRAG = 0.02     # fragment auto-merge needs contact score >= this
-AUTO_FLOAT = 0.15    # fragment+fragment auto-merge threshold
+AUTO_FLOAT = 0.25    # fragment+fragment auto-merge threshold
+AUTO_STEM = 0.05     # stem+stem auto also needs contact score >= this (0 = any contact)
 CAND_MIN = 0.05      # stem+stem pairs reported for review at or above this score
 MIN_FRAG_PTS = 0     # fragments smaller than this are merged regardless of contact score (0 = off)
 AMBIGUOUS = 0.3      # a fragment touching a second host at >= this fraction of the best is left for review
+MAX_SIZE_RATIO = 3.0 # refuse auto when merged size > ratio * max(parts); 0 = off
+
+
+@dataclass(frozen=True)
+class MergeParams:
+    """Thresholds for find_merges / merge_fragments. Defaults match the module constants."""
+
+    voxel: float = VOXEL
+    stem_hag: float = STEM_HAG
+    stem_min_pts: int = STEM_MIN_PTS
+    stem_same: float = STEM_SAME
+    auto_frag: float = AUTO_FRAG
+    auto_float: float = AUTO_FLOAT
+    auto_stem: float = AUTO_STEM
+    cand_min: float = CAND_MIN
+    min_frag_pts: int = MIN_FRAG_PTS
+    ambiguous: float = AMBIGUOUS
+    max_size_ratio: float = MAX_SIZE_RATIO
+
+    def with_updates(self, **kwargs) -> "MergeParams":
+        return replace(self, **kwargs)
+
+    def as_dict(self) -> Dict:
+        return asdict(self)
+
+
+DEFAULTS = MergeParams()
 
 
 def _pack_xyz(xyz: np.ndarray, voxel: float) -> np.ndarray:
@@ -87,14 +119,13 @@ def _contacts(keys: np.ndarray, inv: np.ndarray, n_lab: int) -> Tuple[np.ndarray
 
 
 def analyse(xyz: np.ndarray, labels: np.ndarray, *, ground_xyz: Optional[np.ndarray] = None,
-            voxel: float = VOXEL) -> Dict:
+            voxel: Optional[float] = None, params: Optional[MergeParams] = None) -> Dict:
     """Per-instance stem info and touching pairs. ``ground_xyz`` (e.g. all points) builds the terrain."""
-    import sys
-    from pathlib import Path
+    p = params or DEFAULTS
+    vox = float(voxel if voxel is not None else p.voxel)
+    from .ecomodel_link import ensure_ecomodel_on_path
 
-    root = Path(__file__).resolve().parents[2]
-    if str(root) not in sys.path:
-        sys.path.insert(0, str(root))
+    ensure_ecomodel_on_path(allow_prompt=False, persist=False)
     from promptable_instance import BaseSurface
 
     surf = BaseSurface(ground_xyz if ground_xyz is not None and len(ground_xyz) else xyz)
@@ -102,21 +133,28 @@ def analyse(xyz: np.ndarray, labels: np.ndarray, *, ground_xyz: Optional[np.ndar
     xyz, lab = xyz[m], labels[m].astype(np.int64)
     ul, inv = np.unique(lab, return_inverse=True)
     hag = surf.height(xyz)
-    low = hag < STEM_HAG
+    low = hag < p.stem_hag
     n_low = np.bincount(inv[low], minlength=len(ul))
-    has_stem = n_low >= STEM_MIN_PTS
+    has_stem = n_low >= p.stem_min_pts
     sx = np.bincount(inv[low], weights=xyz[low, 0], minlength=len(ul)) / np.maximum(n_low, 1)
     sy = np.bincount(inv[low], weights=xyz[low, 1], minlength=len(ul)) / np.maximum(n_low, 1)
     size = np.bincount(inv, minlength=len(ul))
     cx = np.bincount(inv, weights=xyz[:, 0], minlength=len(ul)) / np.maximum(size, 1)
     cy = np.bincount(inv, weights=xyz[:, 1], minlength=len(ul)) / np.maximum(size, 1)
-    pk, nc, foot = _contacts(_pack_xyz(xyz, voxel), inv, len(ul))
+    pk, nc, foot = _contacts(_pack_xyz(xyz, vox), inv, len(ul))
     return {"ids": ul, "has_stem": has_stem, "stem_xy": np.stack([sx, sy], 1), "size": size,
             "centroid": np.stack([cx, cy], 1), "pairs": pk, "contacts": nc, "foot": foot}
 
 
-def find_merges(info: Dict) -> Tuple[List[Dict], List[Dict]]:
+def _size_ok(size: np.ndarray, ia: int, ib: int, ratio: float) -> bool:
+    if ratio <= 0:
+        return True
+    return float(size[ia] + size[ib]) <= ratio * float(max(size[ia], size[ib]))
+
+
+def find_merges(info: Dict, params: Optional[MergeParams] = None) -> Tuple[List[Dict], List[Dict]]:
     """(auto merges, review candidates); each {a, b, score, reason}, b merges into a."""
+    p = params or DEFAULTS
     ids, stem, foot, size = info["ids"], info["has_stem"], info["foot"], info["size"]
     best_for_frag: Dict[int, List[Tuple[float, int, float, str, bool]]] = {}
     auto, cands = [], []
@@ -126,27 +164,33 @@ def find_merges(info: Dict) -> Tuple[List[Dict], List[Dict]]:
         if sa and sb:
             d = float(np.hypot(*(info["stem_xy"][ia] - info["stem_xy"][ib])))
             big, small = (ia, ib) if size[ia] >= size[ib] else (ib, ia)
-            if d < STEM_SAME:
-                auto.append({"a": int(ids[big]), "b": int(ids[small]), "score": round(score, 3), "reason": "same stem"})
-            elif score >= CAND_MIN:
+            if d < p.stem_same and score >= p.auto_stem and _size_ok(size, ia, ib, p.max_size_ratio):
+                auto.append({"a": int(ids[big]), "b": int(ids[small]), "score": round(score, 3),
+                             "reason": "same stem"})
+            elif d < p.stem_same:
+                cands.append({"a": int(ids[big]), "b": int(ids[small]), "score": round(min(score, 1.0), 3),
+                              "reason": "same stem weak contact"})
+            elif score >= p.cand_min:
                 cands.append({"a": int(ids[big]), "b": int(ids[small]), "score": round(min(score, 1.0), 3),
                               "reason": "touching trees"})
             continue
         if sa != sb:
             frag, host = (ib, ia) if sa else (ia, ib)
             reason = "crown fragment"
-            ok = score >= AUTO_FRAG or (MIN_FRAG_PTS and size[frag] < MIN_FRAG_PTS)
+            ok = score >= p.auto_frag or (p.min_frag_pts and size[frag] < p.min_frag_pts)
         else:
             frag, host = (ib, ia) if size[ia] >= size[ib] else (ia, ib)
             reason = "floating fragments"
-            ok = score >= AUTO_FLOAT
+            ok = score >= p.auto_float
+        if ok and not _size_ok(size, host, frag, p.max_size_ratio):
+            ok, reason = False, f"{reason} size guard"
         # A fragment joins only its best host; stemmed hosts beat floating ones.
         rank = (1.0 if stem[host] else 0.0) + score
         best_for_frag.setdefault(frag, []).append((rank, host, score, reason, bool(ok)))
     for frag, opts in best_for_frag.items():
         opts.sort(key=lambda o: -o[0])
         _, host, score, reason, ok = opts[0]
-        if len(opts) > 1 and int(opts[1][0]) == int(opts[0][0]) and opts[1][2] >= AMBIGUOUS * score:
+        if len(opts) > 1 and int(opts[1][0]) == int(opts[0][0]) and opts[1][2] >= p.ambiguous * score:
             ok, reason = False, f"ambiguous fragment (also touches {int(ids[opts[1][1]])})"
         item = {"a": int(ids[host]), "b": int(ids[frag]), "score": round(min(score, 1.0), 3), "reason": reason}
         (auto if ok else cands).append(item)
@@ -180,8 +224,11 @@ def union_relabel(labels: np.ndarray, merges: List[Dict]) -> Tuple[np.ndarray, i
 
 
 def merge_fragments(xyz: np.ndarray, labels: np.ndarray, *, ground_xyz: Optional[np.ndarray] = None,
-                    voxel: float = VOXEL, sample_voxel: float = 0.1) -> Tuple[np.ndarray, Dict]:
+                    voxel: Optional[float] = None, sample_voxel: float = 0.1,
+                    params: Optional[MergeParams] = None) -> Tuple[np.ndarray, Dict]:
     """Auto-merge split trees. Returns (labels, report{merged, auto, candidates})."""
+    p = params or DEFAULTS
+    vox = float(voxel if voxel is not None else p.voxel)
     xyz = np.asarray(xyz, dtype=np.float64)
     labels = np.asarray(labels)
     if (labels >= 0).sum() == 0:
@@ -189,7 +236,7 @@ def merge_fragments(xyz: np.ndarray, labels: np.ndarray, *, ground_xyz: Optional
     # Analyse a voxel sample: one point per sample_voxel cell keeps contacts and stems intact.
     first = sample_indices(xyz, sample_voxel)
     info = analyse(xyz[first], labels[first], ground_xyz=xyz[first] if ground_xyz is None else ground_xyz,
-                   voxel=voxel)
-    auto, cands = find_merges(info)
+                   voxel=vox, params=p)
+    auto, cands = find_merges(info, params=p)
     out, n = union_relabel(labels, auto)
     return out, {"merged": n, "auto": auto, "candidates": sorted(cands, key=lambda c: -c["score"])}
